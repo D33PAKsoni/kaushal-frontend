@@ -1,0 +1,39 @@
+@import url("https://fonts.googleapis.com/css2?family=Noto+Sans+Kannada:wght@400;500;600;700&display=swap");
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --km-green: #1a7a4a;
+  --km-gold: #e6a817;
+  --km-saffron: #f47920;
+}
+
+body {
+  font-family: "Noto Sans Kannada", sans-serif;
+}
+
+/* Listening pulse animation */
+@keyframes pulse-ring {
+  0% { transform: scale(0.8); opacity: 1; }
+  100% { transform: scale(2); opacity: 0; }
+}
+
+.listening-indicator::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--km-green);
+  animation: pulse-ring 1.5s ease-out infinite;
+}
+
+/* Transcript fade-in */
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.transcript-entry {
+  animation: slide-up 0.3s ease-out;
+}
