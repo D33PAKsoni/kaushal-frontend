@@ -30,7 +30,7 @@ export default function Home() {
 
       {/* CTA */}
       <Link
-        href="/candidate/register"
+        href="/candidate/language"
         className="bg-yellow-500 hover:bg-yellow-400 text-green-900 font-bold text-lg px-10 py-4 rounded-2xl shadow-lg transition-all active:scale-95"
       >
         ಪ್ರಾರಂಭಿಸಿ · Start
