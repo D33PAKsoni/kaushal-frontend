@@ -34,6 +34,7 @@ function InterviewContent() {
   const [currentQuestion, setCurrentQuestion] = useState({
     en: "",
     kn: "ನಮಸ್ಕಾರ! ಸಂದರ್ಶನಕ್ಕೆ ಸ್ವಾಗತ.",
+    primary: "ನಮಸ್ಕಾರ! ಸಂದರ್ಶನಕ್ಕೆ ಸ್ವಾಗತ.",
   });
   const [turnNumber, setTurnNumber] = useState(0);
   const [currentStage, setCurrentStage] = useState("background");
@@ -116,6 +117,7 @@ function InterviewContent() {
       setCurrentQuestion({
         en: data.next_question_en,
         kn: data.next_question_kn,
+        primary: data.next_question_primary || data.next_question_kn,
       });
 
       if (data.is_complete) {
@@ -125,7 +127,7 @@ function InterviewContent() {
       }
 
       setPhase("question_playing");
-      await speak(data.tts, data.next_question_kn);
+      await speak(data.tts, data.next_question_primary || data.next_question_kn);
       setPhase("listening");
       setIsListening(true);
     } catch (err: any) {
@@ -146,14 +148,28 @@ function InterviewContent() {
     flushIntegrityEvents,
   ]);
 
+  const getOpeningByLanguage = (lang: string) => {
+    if (lang === "hi") return {
+      text: "नमस्कार! कौशल मित्र साक्षात्कार में आपका स्वागत है। कृपया अपने कार्य अनुभव के बारे में बताएं।",
+      lang: "hi-IN",
+    };
+    if (lang === "en") return {
+      text: "Welcome to the KaushalMitra interview. Please tell me about your work experience.",
+      lang: "en-IN",
+    };
+    return {
+      text: "ನಮಸ್ಕಾರ! ಕೌಶಲ ಮಿತ್ರ ಸಂದರ್ಶನಕ್ಕೆ ಸ್ವಾಗತ. ನಿಮ್ಮ ಕೆಲಸದ ಅನುಭವದ ಬಗ್ಗೆ ಹೇಳಿ.",
+      lang: "kn-IN",
+    };
+  };
+
   const startInterview = async () => {
     setPhase("question_playing");
-    const kn =
-      "ನಮಸ್ಕಾರ! ಕೌಶಲ ಮಿತ್ರ ಸಂದರ್ಶನಕ್ಕೆ ಸ್ವಾಗತ. ನಿಮ್ಮ ಕೆಲಸದ ಅನುಭವದ ಬಗ್ಗೆ ಹೇಳಿ.";
-    const en =
-      "Welcome to the KaushalMitra interview. Please tell me about your work experience.";
-    setCurrentQuestion({ en, kn });
-    await speak({ use_browser_tts: true, text: kn }, kn);
+    const lang = sessionInfo?.language || "kn";
+    const opening = getOpeningByLanguage(lang);
+    const en = "Welcome to the KaushalMitra interview. Please tell me about your work experience.";
+    setCurrentQuestion({ en, kn: opening.text, primary: opening.text });
+    await speak({ use_browser_tts: true, text: opening.text }, opening.text);
     setPhase("listening");
     setIsListening(true);
   };
@@ -288,9 +304,9 @@ function InterviewContent() {
                 )}
               </div>
               <p className="font-kannada text-gray-800 text-base leading-relaxed">
-                {currentQuestion.kn}
+                {currentQuestion.primary || currentQuestion.kn}
               </p>
-              {currentQuestion.en && (
+              {currentQuestion.en && currentQuestion.en !== (currentQuestion.primary || currentQuestion.kn) && (
                 <p className="text-gray-400 text-xs mt-2">
                   {currentQuestion.en}
                 </p>

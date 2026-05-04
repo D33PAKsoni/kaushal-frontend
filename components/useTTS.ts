@@ -9,12 +9,19 @@ interface TTSResult {
   source?: string;
 }
 
+// Map our language codes to BCP-47 for Web Speech API
+const LANG_MAP: Record<string, string> = {
+  kn: "kn-IN",
+  hi: "hi-IN",
+  en: "en-IN",
+};
+
 export function useTTS() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
 
-  const speak = useCallback(async (ttsResult: TTSResult, text: string) => {
+  const speak = useCallback(async (ttsResult: TTSResult, text: string, lang: string = "kn") => {
     // Stop any current speech
     stop();
     setIsSpeaking(true);
@@ -28,7 +35,7 @@ export function useTTS() {
         audio.onended = () => setIsSpeaking(false);
         audio.onerror = () => {
           console.warn("Bhashini audio playback failed — falling back to Web Speech");
-          speakBrowser(text);
+          speakBrowser(text, lang);
         };
         await audio.play();
         return;
@@ -37,28 +44,29 @@ export function useTTS() {
       }
     }
 
-    // Option B: Browser Web Speech API (lang=kn-IN)
-    speakBrowser(ttsResult.text || text);
+    // Option B: Browser Web Speech API
+    speakBrowser(ttsResult.text || text, lang);
   }, []);
 
-  const speakBrowser = useCallback((text: string) => {
+  const speakBrowser = useCallback((text: string, lang: string = "kn") => {
     if (!("speechSynthesis" in window)) {
       console.warn("Web Speech API not supported");
       setIsSpeaking(false);
       return;
     }
 
+    const bcp47 = LANG_MAP[lang] || "kn-IN";
     const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "kn-IN";
+    utterance.lang = bcp47;
     utterance.rate = 0.9;
     utterance.pitch = 1.0;
 
-    // Try to find a Kannada voice
+    // Try to find a matching voice
     const voices = window.speechSynthesis.getVoices();
-    const kannadaVoice = voices.find(
-      (v) => v.lang === "kn-IN" || v.lang.startsWith("kn")
+    const matchedVoice = voices.find(
+      (v) => v.lang === bcp47 || v.lang.startsWith(bcp47.split("-")[0])
     );
-    if (kannadaVoice) utterance.voice = kannadaVoice;
+    if (matchedVoice) utterance.voice = matchedVoice;
 
     utterance.onend = () => setIsSpeaking(false);
     utterance.onerror = () => setIsSpeaking(false);
@@ -79,5 +87,5 @@ export function useTTS() {
     setIsSpeaking(false);
   }, []);
 
-  return { speak, stop, isSpeaking, speakBrowser };
+  return { speak, stop, isSpeaking, speakBrowser };  // speakBrowser exposed for direct use
 }
