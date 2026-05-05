@@ -14,17 +14,19 @@ interface AudioRecorderProps {
   apiUrl: string;
   onTranscript: (entry: TranscriptEntry) => void;
   onError?: (error: string) => void;
-  isActive: boolean;
+  isActive: boolean;         // controlled by parent — true = recording
+  onMicReady?: () => void;   // called once mic permission is granted
 }
 
-const CHUNK_DURATION_MS = 5000;  // 5-second chunks per spec
-const OVERLAP_MS = 1000;          // 1-second overlap
+const CHUNK_DURATION_MS = 5000;
+const OVERLAP_MS = 500;
 
 export default function AudioRecorder({
   apiUrl,
   onTranscript,
   onError,
   isActive,
+  onMicReady,
 }: AudioRecorderProps) {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -33,7 +35,6 @@ export default function AudioRecorder({
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
 
-  // Determine best MIME type for this browser
   const getSupportedMimeType = (): string => {
     const types = [
       "audio/webm;codecs=opus",
@@ -42,34 +43,26 @@ export default function AudioRecorder({
       "audio/mp4",
     ];
     for (const type of types) {
-      if (MediaRecorder.isTypeSupported(type)) return type;
+      if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(type))
+        return type;
     }
     return "";
   };
 
   const sendChunk = useCallback(
     async (blob: Blob) => {
-      if (blob.size < 100) return; // Too small — skip silence
-
+      if (blob.size < 100) return;
       setIsProcessing(true);
       try {
         const formData = new FormData();
         formData.append("audio", blob, "chunk.webm");
-
         const res = await fetch(`${apiUrl}/asr/transcribe`, {
           method: "POST",
           body: formData,
         });
-
-        if (!res.ok) {
-          const errText = await res.text();
-          console.error("ASR error:", errText);
-          onError?.(`ASR error: ${res.status}`);
-          return;
-        }
-
+        if (!res.ok) { onError?.(`ASR error: ${res.status}`); return; }
         const data = await res.json();
-        if (data.transcript && data.transcript.trim()) {
+        if (data.transcript?.trim()) {
           onTranscript({
             text: data.transcript,
             language: data.language,
@@ -79,14 +72,43 @@ export default function AudioRecorder({
           });
         }
       } catch (err) {
-        console.error("Network error sending chunk:", err);
-        onError?.("Network error — check backend connection");
+        onError?.("Network error — check backend");
       } finally {
         setIsProcessing(false);
       }
     },
     [apiUrl, onTranscript, onError]
   );
+
+  // Initialise mic stream once on mount (asks permission early)
+  useEffect(() => {
+    const initStream = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            sampleRate: 16000,
+            echoCancellation: true,
+            noiseSuppression: true,
+          },
+        });
+        streamRef.current = stream;
+        // Keep stream alive but paused — stop tracks immediately,
+        // we'll re-request when actually recording
+        stream.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+        onMicReady?.();
+      } catch (err: any) {
+        onError?.(
+          err.name === "NotAllowedError"
+            ? "Microphone access denied"
+            : `Mic error: ${err.message}`
+        );
+      }
+    };
+    initStream();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const startRecording = useCallback(async () => {
     try {
@@ -98,7 +120,6 @@ export default function AudioRecorder({
           noiseSuppression: true,
         },
       });
-
       streamRef.current = stream;
       const mimeType = getSupportedMimeType();
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
@@ -106,11 +127,8 @@ export default function AudioRecorder({
       chunksRef.current = [];
 
       recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) {
-          chunksRef.current.push(e.data);
-        }
+        if (e.data.size > 0) chunksRef.current.push(e.data);
       };
-
       recorder.onstop = () => {
         const blob = new Blob(chunksRef.current, {
           type: mimeType || "audio/webm",
@@ -119,17 +137,13 @@ export default function AudioRecorder({
         sendChunk(blob);
       };
 
-      // Chunked recording loop
       const recordChunk = () => {
         if (!mediaRecorderRef.current) return;
-
         chunksRef.current = [];
         mediaRecorderRef.current.start();
-
         timerRef.current = setTimeout(() => {
           if (mediaRecorderRef.current?.state === "recording") {
             mediaRecorderRef.current.stop();
-            // Restart after overlap delay
             setTimeout(recordChunk, OVERLAP_MS);
           }
         }, CHUNK_DURATION_MS);
@@ -138,11 +152,10 @@ export default function AudioRecorder({
       recordChunk();
       setIsRecording(true);
     } catch (err: any) {
-      console.error("Mic access error:", err);
       onError?.(
         err.name === "NotAllowedError"
-          ? "Microphone access denied — please allow mic access"
-          : `Microphone error: ${err.message}`
+          ? "Microphone access denied"
+          : `Mic error: ${err.message}`
       );
     }
   }, [sendChunk, onError]);
@@ -158,39 +171,27 @@ export default function AudioRecorder({
     setIsRecording(false);
   }, []);
 
-  // Start/stop based on isActive prop
   useEffect(() => {
-    if (isActive && !isRecording) {
-      startRecording();
-    } else if (!isActive && isRecording) {
-      stopRecording();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (isActive && !isRecording) startRecording();
+    else if (!isActive && isRecording) stopRecording();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isActive]);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => stopRecording();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  useEffect(() => () => stopRecording(), [stopRecording]);
 
+  // Invisible component — UI is in the interview page
   return (
-    <div className="flex flex-col items-center gap-2">
-      {/* Listening indicator */}
+    <div className="flex items-center gap-2 justify-center">
       {isRecording && (
-        <div className="flex items-center gap-3">
-          <div className="relative w-4 h-4">
-            <div className="absolute inset-0 bg-green-500 rounded-full animate-ping opacity-75" />
-            <div className="w-4 h-4 bg-green-600 rounded-full" />
+        <div className="flex items-center gap-2">
+          <div className="relative w-3 h-3">
+            <div className="absolute inset-0 bg-red-500 rounded-full animate-ping opacity-75" />
+            <div className="w-3 h-3 bg-red-600 rounded-full" />
           </div>
-          <span className="text-green-700 font-medium font-kannada text-sm">
-            {isProcessing ? "ಪ್ರಕ್ರಿಯೆಯಲ್ಲಿದೆ..." : "ಕೇಳುತ್ತಿದ್ದೇನೆ..."}
+          <span className="text-xs text-red-600 font-medium">
+            {isProcessing ? "Processing..." : "Recording..."}
           </span>
         </div>
-      )}
-
-      {!isRecording && !isActive && (
-        <span className="text-gray-400 text-sm">Microphone inactive</span>
       )}
     </div>
   );

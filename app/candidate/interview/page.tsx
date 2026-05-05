@@ -5,15 +5,18 @@ import { useSearchParams, useRouter } from "next/navigation";
 import AudioRecorder, { TranscriptEntry } from "@/components/AudioRecorder";
 import FaceMonitor, { IntegrityEvent } from "@/components/FaceMonitor";
 import { useTTS } from "@/components/useTTS";
-import { t, Lang } from "@/lib/translations";
+import { t, T, Lang } from "@/lib/translations";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-type InterviewPhase =
+// Interview phase state machine
+// setup → question_playing → ready_to_answer → recording → processing → (repeat) → complete
+type Phase =
   | "setup"
-  | "question_playing"   // TTS speaking — mic MUST be OFF
-  | "listening"          // mic ON — candidate answering
-  | "processing"         // waiting for agent response — mic OFF
+  | "question_playing"   // TTS active — mic button greyed out
+  | "ready_to_answer"    // TTS done — mic button lit up, waiting for candidate to press
+  | "recording"          // candidate pressed mic — recording in progress
+  | "processing"         // answer submitted — waiting for agent
   | "complete";
 
 interface Turn {
@@ -24,7 +27,7 @@ interface Turn {
   stage: string;
 }
 
-const STAGE_LABEL_KEY: Record<string, keyof typeof import("@/lib/translations").T> = {
+const STAGE_KEY: Record<string, any> = {
   background: "stageBackground",
   l1_domain: "stageL1",
   l2_advanced: "stageL2",
@@ -39,7 +42,7 @@ function InterviewContent() {
 
   const [lang, setLang] = useState<Lang>("kn");
   const [sessionInfo, setSessionInfo] = useState<any>(null);
-  const [phase, setPhase] = useState<InterviewPhase>("setup");
+  const [phase, setPhase] = useState<Phase>("setup");
   const [currentQuestion, setCurrentQuestion] = useState({ primary: "", en: "" });
   const [turnNumber, setTurnNumber] = useState(0);
   const [currentStage, setCurrentStage] = useState("background");
@@ -48,14 +51,13 @@ function InterviewContent() {
   const [integrityEvents, setIntegrityEvents] = useState<IntegrityEvent[]>([]);
   const [error, setError] = useState("");
   const [processingTime, setProcessingTime] = useState(0);
+  const [micPermitted, setMicPermitted] = useState(false);
 
   const { speak, stop: stopTTS, isSpeaking } = useTTS();
   const processingStartRef = useRef<number>(0);
 
-  // ── mic is ONLY on during "listening" phase ────────────
-  // This is the core fix: isListening = (phase === "listening")
-  // During question_playing and processing the mic is off.
-  const isListening = phase === "listening";
+  // Mic is ONLY active when phase === "recording"
+  const isRecording = phase === "recording";
 
   useEffect(() => {
     const storedLang = sessionStorage.getItem("km_lang") as Lang | null;
@@ -65,34 +67,33 @@ function InterviewContent() {
   }, []);
 
   const handleTranscript = useCallback((entry: TranscriptEntry) => {
-    // Guard: only accumulate if we are actually in listening phase
-    // (belt-and-suspenders in case a late chunk arrives after phase change)
+    // Only accumulate if still in recording phase
     setCurrentTranscript((prev) =>
       prev ? `${prev} ${entry.text}` : entry.text
     );
   }, []);
 
-  const flushIntegrityEvents = useCallback(
-    async (events: IntegrityEvent[]) => {
-      if (!events.length) return;
-      try {
-        await fetch(`${API_URL}/session/${sessionId}/integrity`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ events }),
-        });
-      } catch { /* non-critical */ }
-    },
-    [sessionId]
-  );
+  const flushIntegrityEvents = useCallback(async (events: IntegrityEvent[]) => {
+    if (!events.length) return;
+    try {
+      await fetch(`${API_URL}/session/${sessionId}/integrity`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ events }),
+      });
+    } catch { /* non-critical */ }
+  }, [sessionId]);
 
-  const submitAnswer = useCallback(async () => {
-    // IMPORTANT: set phase to processing BEFORE any async work.
-    // AudioRecorder watches isListening (= phase === "listening") and
-    // will stop recording immediately when phase changes.
+  // Called when candidate presses mic button to stop and submit
+  const handleStopAndSubmit = useCallback(async () => {
+    if (phase !== "recording") return;
+    // Stop mic immediately
     setPhase("processing");
     setError("");
     processingStartRef.current = Date.now();
+
+    // Small delay to let the last audio chunk arrive
+    await new Promise((r) => setTimeout(r, 600));
 
     try {
       const res = await fetch(`${API_URL}/agent/turn`, {
@@ -110,7 +111,6 @@ function InterviewContent() {
       const data = await res.json();
 
       setProcessingTime(Date.now() - processingStartRef.current);
-
       setTurns((prev) => [
         ...prev,
         {
@@ -136,35 +136,31 @@ function InterviewContent() {
         return;
       }
 
-      // Play question — mic stays OFF during this entire phase
+      // Play next question — mic button stays greyed
       setPhase("question_playing");
       await speak(
         data.tts,
         data.next_question_primary || data.next_question_kn,
         lang
       );
+      // TTS done → light up mic button
+      setPhase("ready_to_answer");
 
-      // TTS done → now enable mic
-      setPhase("listening");
     } catch (err: any) {
-      console.error(err);
       setError(`${t("connectionError", lang)}: ${err.message}`);
-      setPhase("listening"); // re-enable mic so they can retry
+      setPhase("ready_to_answer");
     }
   }, [
-    currentTranscript, turnNumber, sessionId, sessionInfo,
-    currentQuestion, currentStage, integrityEvents, lang,
-    speak, flushIntegrityEvents,
+    phase, currentTranscript, turnNumber, sessionId, sessionInfo,
+    currentQuestion, currentStage, integrityEvents, lang, speak, flushIntegrityEvents,
   ]);
 
   const startInterview = async () => {
     const openingText = t("openingQuestion", lang);
     setCurrentQuestion({ primary: openingText, en: T.openingQuestion.en });
-    // Play opening — mic OFF
     setPhase("question_playing");
     await speak({ use_browser_tts: true, text: openingText }, openingText, lang);
-    // Opening done → mic ON
-    setPhase("listening");
+    setPhase("ready_to_answer");
   };
 
   const handleIntegrityEvent = useCallback(
@@ -172,17 +168,54 @@ function InterviewContent() {
     []
   );
 
-  const stageLabel = (stage: string) => {
-    const key = STAGE_LABEL_KEY[stage];
-    return key ? t(key as any, lang) : stage;
+  const sl = (stage: string) => {
+    const key = STAGE_KEY[stage];
+    return key ? t(key, lang) : stage;
   };
+
+  // ── Mic button config ──────────────────────────────────
+  const micButtonConfig = (() => {
+    switch (phase) {
+      case "setup":
+        return { disabled: true, label: "–", color: "bg-gray-300 text-gray-400", pulse: false };
+      case "question_playing":
+        return {
+          disabled: true,
+          label: lang === "kn" ? "🔇 ಪ್ರಶ್ನೆ ನಡೆಯುತ್ತಿದೆ..." : "🔇 Question playing...",
+          color: "bg-gray-300 text-gray-400 cursor-not-allowed",
+          pulse: false,
+        };
+      case "ready_to_answer":
+        return {
+          disabled: false,
+          label: lang === "kn" ? "🎤 ಮೈಕ್ ಒತ್ತಿ ಮಾತನಾಡಿ" : "🎤 Press to Speak",
+          color: "bg-green-600 hover:bg-green-500 text-white shadow-lg animate-pulse",
+          pulse: true,
+        };
+      case "recording":
+        return {
+          disabled: false,
+          label: lang === "kn" ? "⏹️ ನಿಲ್ಲಿಸಿ ಮತ್ತು ಸಲ್ಲಿಸಿ" : "⏹️ Stop & Submit",
+          color: "bg-red-500 hover:bg-red-400 text-white shadow-lg",
+          pulse: false,
+        };
+      case "processing":
+        return {
+          disabled: true,
+          label: lang === "kn" ? "⏳ ವಿಶ್ಲೇಷಿಸಲಾಗುತ್ತಿದೆ..." : "⏳ Analysing...",
+          color: "bg-gray-300 text-gray-400 cursor-not-allowed",
+          pulse: false,
+        };
+      default:
+        return { disabled: true, label: "–", color: "bg-gray-300", pulse: false };
+    }
+  })();
 
   // ── Complete screen ────────────────────────────────────
   if (phase === "complete") {
-    const avgScore =
-      turns.length
-        ? Math.round(turns.reduce((s, t) => s + t.score, 0) / turns.length)
-        : 0;
+    const avgScore = turns.length
+      ? Math.round(turns.reduce((s, t) => s + t.score, 0) / turns.length)
+      : 0;
     return (
       <main className="min-h-screen bg-gradient-to-b from-green-900 to-green-700 flex items-center justify-center px-4">
         <div className="bg-white rounded-2xl p-8 max-w-sm w-full text-center shadow-xl">
@@ -213,7 +246,7 @@ function InterviewContent() {
     );
   }
 
-  // ── Main interview screen ──────────────────────────────
+  // ── Main screen ────────────────────────────────────────
   return (
     <main className="min-h-screen bg-gray-50 flex flex-col max-w-lg mx-auto">
       {/* Header */}
@@ -221,18 +254,18 @@ function InterviewContent() {
         <div>
           <h1 className="font-bold text-base">KaushalMitra</h1>
           <p className="text-green-300 text-xs">
-            {stageLabel(currentStage)} · {turnNumber}/8
+            {sl(currentStage)} · {turnNumber}/8
           </p>
         </div>
         {sessionInfo && (
           <div className="text-right text-xs">
             <p className="font-medium">{sessionInfo.name}</p>
-            <p className="text-green-300">{sessionInfo.trade}</p>
+            <p className="text-green-300 capitalize">{sessionInfo.trade}</p>
           </div>
         )}
       </div>
 
-      {/* Progress bar */}
+      {/* Progress */}
       <div className="h-1.5 bg-gray-200">
         <div
           className="h-full bg-green-500 transition-all duration-700"
@@ -245,6 +278,7 @@ function InterviewContent() {
         <FaceMonitor
           isActive={phase !== "setup"}
           onEvent={handleIntegrityEvent}
+          onCameraReady={() => {}}
           showOverlay={true}
         />
       </div>
@@ -252,64 +286,66 @@ function InterviewContent() {
       {/* Content */}
       <div className="flex-1 px-4 py-4 overflow-y-auto">
         {phase === "setup" ? (
-          <div className="text-center mt-6">
-            <div className="text-5xl mb-4">🎤</div>
+          <div className="text-center mt-4">
+            <div className="text-5xl mb-3">🎤</div>
             <p className="text-lg text-gray-700 font-semibold mb-2">
               {t("readyQuestion", lang)}
             </p>
-            <ul className="text-sm text-gray-500 text-left space-y-2 bg-gray-50 rounded-xl p-4 mt-4">
+            <ul className="text-sm text-gray-500 text-left space-y-2 bg-gray-50 rounded-xl p-4 mt-3">
               <li>✅ {t("enableCamera", lang)}</li>
               <li>✅ {t("quietPlace", lang)}</li>
               <li>✅ {t("eightQuestions", lang)}</li>
+              <li>
+                {lang === "kn"
+                  ? "✅ ಮೈಕ್ ಬಟನ್ ಒತ್ತಿ ಉತ್ತರಿಸಿ"
+                  : "✅ Press the mic button to answer each question"}
+              </li>
             </ul>
           </div>
         ) : (
           <div className="space-y-3">
             {/* Question card */}
             <div
-              className={`rounded-2xl p-4 shadow-sm border transition-colors ${
+              className={`rounded-2xl p-4 shadow-sm border transition-all ${
                 phase === "question_playing"
                   ? "bg-blue-50 border-blue-300"
-                  : phase === "listening"
-                  ? "bg-white border-green-200"
+                  : phase === "ready_to_answer"
+                  ? "bg-green-50 border-green-300"
+                  : phase === "recording"
+                  ? "bg-red-50 border-red-200"
                   : "bg-white border-gray-200"
               }`}
             >
               <div className="flex items-center gap-2 mb-2 flex-wrap">
                 <span className="text-xs bg-green-100 text-green-700 rounded-full px-2 py-0.5">
-                  {stageLabel(currentStage)}
+                  {sl(currentStage)}
                 </span>
                 {phase === "question_playing" && (
                   <span className="text-xs text-blue-500 animate-pulse">
                     🔊 {t("questionPlaying", lang)}
                   </span>
                 )}
-                {phase === "listening" && (
-                  <span className="text-xs text-green-600 animate-pulse">
-                    🎤 {t("listeningLabel", lang)}
+                {phase === "ready_to_answer" && (
+                  <span className="text-xs text-green-600 font-medium animate-pulse">
+                    {lang === "kn" ? "👇 ಮೈಕ್ ಒತ್ತಿ ಉತ್ತರಿಸಿ" : "👇 Press mic to answer"}
+                  </span>
+                )}
+                {phase === "recording" && (
+                  <span className="text-xs text-red-600 animate-pulse font-medium">
+                    🔴 {t("listeningLabel", lang)}
                   </span>
                 )}
               </div>
               <p className="text-gray-800 text-base leading-relaxed">
                 {currentQuestion.primary}
               </p>
-              {/* Show English subtitle only for Kannada mode */}
               {lang === "kn" && currentQuestion.en && currentQuestion.en !== currentQuestion.primary && (
                 <p className="text-gray-400 text-xs mt-2">{currentQuestion.en}</p>
               )}
             </div>
 
-            {/* Mic muted notice during TTS */}
-            {phase === "question_playing" && (
-              <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-2 text-blue-600 text-xs text-center">
-                🔇 {lang === "kn"
-                  ? "ಪ್ರಶ್ನೆ ನಡೆಯುತ್ತಿದೆ — ಮೈಕ್ ಮ್ಯೂಟ್ ಆಗಿದೆ"
-                  : "Question playing — microphone muted"}
-              </div>
-            )}
-
-            {/* Live transcript */}
-            {currentTranscript && phase === "listening" && (
+            {/* Live transcript while recording */}
+            {currentTranscript && (phase === "recording" || phase === "processing") && (
               <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-3">
                 <p className="text-xs text-yellow-600 mb-1 font-medium">
                   {t("yourAnswer", lang)}
@@ -320,9 +356,9 @@ function InterviewContent() {
               </div>
             )}
 
-            {/* Processing */}
+            {/* Processing spinner */}
             {phase === "processing" && (
-              <div className="text-center py-4 text-gray-500 text-sm">
+              <div className="text-center py-3 text-gray-500 text-sm">
                 <div className="inline-block w-5 h-5 border-2 border-green-500 border-t-transparent rounded-full animate-spin mr-2 align-middle" />
                 {t("analyzing", lang)}
               </div>
@@ -330,18 +366,13 @@ function InterviewContent() {
 
             {/* Previous turns */}
             {turns.length > 0 && (
-              <div className="mt-2 space-y-2">
+              <div className="space-y-2 mt-1">
                 <p className="text-xs text-gray-400 uppercase tracking-wide">
                   {t("previousAnswers", lang)}
                 </p>
                 {turns.slice(-2).reverse().map((turn, i) => (
-                  <div
-                    key={i}
-                    className="bg-white rounded-xl p-3 border border-gray-100 opacity-60"
-                  >
-                    <p className="text-xs text-gray-500 truncate">
-                      {turn.question_primary}
-                    </p>
+                  <div key={i} className="bg-white rounded-xl p-3 border border-gray-100 opacity-60">
+                    <p className="text-xs text-gray-500 truncate">{turn.question_primary}</p>
                     <span
                       className={`text-xs rounded-full px-2 py-0.5 mt-1 inline-block ${
                         turn.quality === "excellent" || turn.quality === "good"
@@ -365,55 +396,52 @@ function InterviewContent() {
         )}
       </div>
 
-      {/* Bottom controls */}
-      <div className="px-4 py-4 bg-white border-t border-gray-100 space-y-2">
-        {/* AudioRecorder is controlled purely by isListening = (phase === "listening") */}
+      {/* ── Bottom controls ── */}
+      <div className="px-4 pb-6 pt-3 bg-white border-t border-gray-100 space-y-3">
+
+        {/* AudioRecorder — invisible, only active when phase==="recording" */}
         <AudioRecorder
           apiUrl={API_URL}
           onTranscript={handleTranscript}
           onError={(e) => setError(e)}
-          isActive={isListening}
+          isActive={isRecording}
+          onMicReady={() => setMicPermitted(true)}
         />
 
-        {phase === "setup" && (
+        {phase === "setup" ? (
           <button
             onClick={startInterview}
             className="w-full bg-green-700 text-white py-5 rounded-2xl font-bold text-lg active:scale-95 transition-all shadow-lg"
           >
             🎤 {t("interviewStart", lang)}
           </button>
-        )}
+        ) : (
+          <div className="space-y-2">
+            {/* THE MIC BUTTON — central UX element */}
+            <button
+              disabled={micButtonConfig.disabled}
+              onClick={() => {
+                if (phase === "ready_to_answer") {
+                  setCurrentTranscript(""); // clear any stale text
+                  setPhase("recording");
+                } else if (phase === "recording") {
+                  handleStopAndSubmit();
+                }
+              }}
+              className={`w-full py-5 rounded-2xl font-bold text-lg transition-all active:scale-95 ${micButtonConfig.color}`}
+            >
+              {micButtonConfig.label}
+            </button>
 
-        {phase === "listening" && (
-          <button
-            onClick={submitAnswer}
-            className={`w-full py-5 rounded-2xl font-bold text-lg active:scale-95 transition-all shadow-md ${
-              currentTranscript.trim()
-                ? "bg-blue-600 hover:bg-blue-500 text-white"
-                : "bg-green-700 text-white"
-            }`}
-          >
-            {currentTranscript.trim()
-              ? `✅ ${t("submitAnswer", lang)}`
-              : `🎤 ${t("speaking", lang)}`}
-          </button>
-        )}
-
-        {phase === "question_playing" && (
-          <button
-            onClick={() => {
-              stopTTS();
-              setPhase("listening");
-            }}
-            className="w-full bg-yellow-500 text-white py-5 rounded-2xl font-bold text-lg active:scale-95"
-          >
-            ⏭️ {t("skipQuestion", lang)}
-          </button>
-        )}
-
-        {phase === "processing" && (
-          <div className="w-full bg-gray-100 py-5 rounded-2xl text-center text-gray-400 font-medium">
-            ⏳ {t("analyzing", lang)}
+            {/* Skip TTS button */}
+            {phase === "question_playing" && (
+              <button
+                onClick={() => { stopTTS(); setPhase("ready_to_answer"); }}
+                className="w-full bg-yellow-500 text-white py-3 rounded-xl text-sm font-medium active:scale-95"
+              >
+                ⏭️ {t("skipQuestion", lang)}
+              </button>
+            )}
           </div>
         )}
 
@@ -425,9 +453,6 @@ function InterviewContent() {
     </main>
   );
 }
-
-// Import T directly for the opening question English fallback
-import { T } from "@/lib/translations";
 
 export default function InterviewPage() {
   return (
