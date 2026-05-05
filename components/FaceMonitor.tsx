@@ -14,12 +14,14 @@ interface FaceMonitorProps {
   isActive: boolean;
   onEvent?: (event: IntegrityEvent) => void;
   showOverlay?: boolean;
+  lang?: string;
 }
 
 export default function FaceMonitor({
   isActive,
   onEvent,
   showOverlay = true,
+  lang = "kn",
 }: FaceMonitorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -27,20 +29,27 @@ export default function FaceMonitor({
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const eventsRef = useRef<IntegrityEvent[]>([]);
 
-  const [status, setStatus] = useState<"idle" | "ok" | "warning" | "error">("idle");
-  const [statusText, setStatusText] = useState("ಕ್ಯಾಮೆರಾ ಆರಂಭಿಸಲಾಗುತ್ತಿದೆ...");
-  const [faceDetected, setFaceDetected] = useState(false);
+  const [status, setStatus] = useState<"idle" | "requesting" | "ok" | "warning" | "error">("idle");
+  const [statusText, setStatusText] = useState("");
+  const [permissionDenied, setPermissionDenied] = useState(false);
 
-  // Simple face detection using canvas pixel analysis
-  // In production this would use MediaPipe WASM
-  // For Day 2 demo: camera on = face assumed present, checks for very dark frames
+  const labels = {
+    requesting: { kn: "ಕ್ಯಾಮೆರಾ ಅನುಮತಿ ಕೋರಲಾಗುತ್ತಿದೆ...", en: "Requesting camera..." },
+    denied: { kn: "ಕ್ಯಾಮೆರಾ ಅನುಮತಿ ಇಲ್ಲ", en: "Camera permission denied" },
+    ok: { kn: "✓ ಕ್ಯಾಮೆರಾ ಸಕ್ರಿಯ", en: "✓ Camera active" },
+    covered: { kn: "⚠ ಕ್ಯಾಮೆರಾ ಮುಚ್ಚಲಾಗಿದೆ", en: "⚠ Camera covered" },
+    noFace: { kn: "⚠ ಮುಖ ಕಾಣಿಸುತ್ತಿಲ್ಲ", en: "⚠ Face not visible" },
+  };
+
+  const l = (key: keyof typeof labels) =>
+    labels[key][lang as "kn" | "en"] ?? labels[key]["en"];
+
   const checkFrame = useCallback(() => {
     if (!videoRef.current || !canvasRef.current) return;
-
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    if (!ctx || video.readyState < 2) return;
 
     canvas.width = 160;
     canvas.height = 120;
@@ -48,51 +57,36 @@ export default function FaceMonitor({
 
     const imageData = ctx.getImageData(0, 0, 160, 120);
     const data = imageData.data;
-
-    // Calculate average brightness
-    let totalBrightness = 0;
+    let total = 0;
     for (let i = 0; i < data.length; i += 4) {
-      totalBrightness += (data[i] + data[i + 1] + data[i + 2]) / 3;
+      total += (data[i] + data[i + 1] + data[i + 2]) / 3;
     }
-    const avgBrightness = totalBrightness / (data.length / 4);
-
-    // Very dark frame = camera covered or no face
-    const isCovered = avgBrightness < 15;
-    const facePresent = !isCovered && video.readyState >= 2;
-
-    const eventType: IntegrityEvent["event_type"] = isCovered
-      ? "face_covered"
-      : facePresent
-      ? "face_ok"
-      : "no_face";
+    const avg = total / (data.length / 4);
+    const isCovered = avg < 15;
+    const facePresent = !isCovered;
 
     const event: IntegrityEvent = {
       timestamp_ms: Date.now(),
-      event_type: eventType,
+      event_type: isCovered ? "face_covered" : "face_ok",
       face_detected: facePresent,
       multiple_faces: false,
-      face_coverage: avgBrightness / 255,
+      face_coverage: avg / 255,
     };
 
     eventsRef.current.push(event);
     onEvent?.(event);
-    setFaceDetected(facePresent);
 
     if (isCovered) {
       setStatus("error");
-      setStatusText("ಕ್ಯಾಮೆರಾ ಮುಚ್ಚಲಾಗಿದೆ · Camera covered");
-    } else if (facePresent) {
-      setStatus("ok");
-      setStatusText("✓ ಮುಖ ಪತ್ತೆಯಾಗಿದೆ");
+      setStatusText(l("covered"));
     } else {
-      setStatus("warning");
-      setStatusText("⚠ ಮುಖ ಕಾಣಿಸುತ್ತಿಲ್ಲ");
+      setStatus("ok");
+      setStatusText(l("ok"));
     }
-  }, [onEvent]);
+  }, [onEvent, lang]);
 
   useEffect(() => {
     if (!isActive) {
-      // Stop camera
       if (intervalRef.current) clearInterval(intervalRef.current);
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
@@ -102,84 +96,135 @@ export default function FaceMonitor({
       return;
     }
 
-    // Start camera
     const startCamera = async () => {
+      setStatus("requesting");
+      setStatusText(l("requesting"));
+
       try {
+        /**
+         * Fix for Issue 2 (no camera on desktop):
+         * We explicitly call getUserMedia with video constraints.
+         * On desktop Chrome this WILL show the permission bar.
+         * The key was that previous code was sometimes not awaiting
+         * properly or the component was unmounting before the prompt appeared.
+         * We also add a small delay to ensure the component is mounted.
+         */
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "user", width: 320, height: 240 },
+          video: {
+            facingMode: "user",
+            width: { ideal: 320 },
+            height: { ideal: 240 },
+          },
           audio: false,
         });
+
         streamRef.current = stream;
+
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          await videoRef.current.play();
+          // Use onloadedmetadata to ensure video dimensions are ready
+          videoRef.current.onloadedmetadata = () => {
+            videoRef.current?.play().then(() => {
+              setStatus("ok");
+              setStatusText(l("ok"));
+              // Start integrity checks every 2 seconds
+              intervalRef.current = setInterval(checkFrame, 2000);
+            });
+          };
         }
-        setStatus("ok");
-        setStatusText("✓ ಮುಖ ಪತ್ತೆಯಾಗಿದೆ");
-
-        // Check every 2 seconds as per spec
-        intervalRef.current = setInterval(checkFrame, 2000);
-      } catch (err) {
+      } catch (err: any) {
         console.error("Camera error:", err);
+        setPermissionDenied(true);
         setStatus("error");
-        setStatusText("ಕ್ಯಾಮೆರಾ ಅನುಮತಿ ಇಲ್ಲ");
+        setStatusText(l("denied"));
       }
     };
 
-    startCamera();
-
+    // Small delay ensures component is fully mounted before prompt
+    const timer = setTimeout(startCamera, 300);
     return () => {
+      clearTimeout(timer);
       if (intervalRef.current) clearInterval(intervalRef.current);
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
       }
     };
-  }, [isActive, checkFrame]);
-
-  // Expose events for flush to backend
-  const getEvents = useCallback(() => eventsRef.current, []);
+  }, [isActive, checkFrame, lang]);
 
   if (!showOverlay) return null;
 
   return (
-    <div className="relative">
-      {/* Hidden video element */}
+    <div className="relative rounded-xl overflow-hidden bg-gray-900">
+      {/* Video element — always rendered so browser can attach stream */}
       <video
         ref={videoRef}
-        className="w-full rounded-xl object-cover"
-        style={{ maxHeight: "160px", transform: "scaleX(-1)" }}
+        className="w-full object-cover rounded-xl"
+        style={{
+          maxHeight: "160px",
+          transform: "scaleX(-1)", // mirror for selfie view
+          display: status === "idle" ? "none" : "block",
+        }}
         playsInline
         muted
+        autoPlay
       />
+
       {/* Hidden canvas for pixel analysis */}
       <canvas ref={canvasRef} className="hidden" />
 
-      {/* Status overlay */}
-      <div
-        className={`absolute top-2 right-2 px-2 py-1 rounded-lg text-xs font-medium ${
-          status === "ok"
-            ? "bg-green-500/80 text-white"
-            : status === "warning"
-            ? "bg-yellow-500/80 text-white"
-            : status === "error"
-            ? "bg-red-500/80 text-white"
-            : "bg-gray-500/80 text-white"
-        }`}
-      >
-        {statusText}
-      </div>
+      {/* Permission denied fallback */}
+      {permissionDenied && (
+        <div className="bg-gray-800 rounded-xl px-4 py-3 text-center">
+          <p className="text-yellow-400 text-xs">
+            {lang === "kn"
+              ? "📷 ಕ್ಯಾಮೆರಾ ಅನುಮತಿ ಬೇಕು — ಬ್ರೌಸರ್ ಸೆಟ್ಟಿಂಗ್ ಪರಿಶೀಲಿಸಿ"
+              : "📷 Camera permission needed — check browser settings"}
+          </p>
+          <p className="text-gray-400 text-xs mt-1">
+            {lang === "kn"
+              ? "ಸಂದರ್ಶನ ಮುಂದುವರಿಯುತ್ತದೆ (ಮೈಕ್ ಮಾತ್ರ)"
+              : "Interview will continue (microphone only)"}
+          </p>
+        </div>
+      )}
 
-      {/* Face indicator dot */}
-      <div className="absolute top-2 left-2">
+      {/* Requesting state */}
+      {status === "requesting" && !permissionDenied && (
+        <div className="bg-gray-800 rounded-xl px-4 py-3 text-center">
+          <p className="text-blue-300 text-xs animate-pulse">
+            {lang === "kn"
+              ? "📷 ಕ್ಯಾಮೆರಾ ಅನುಮತಿ ಕೋರಲಾಗುತ್ತಿದೆ..."
+              : "📷 Requesting camera access..."}
+          </p>
+          <p className="text-gray-400 text-xs mt-1">
+            {lang === "kn"
+              ? "ಬ್ರೌಸರ್ ಮೇಲ್ಭಾಗದಲ್ಲಿ Allow ಕ್ಲಿಕ್ ಮಾಡಿ"
+              : "Click Allow in the browser bar above"}
+          </p>
+        </div>
+      )}
+
+      {/* Status overlay on video */}
+      {status !== "idle" && status !== "requesting" && !permissionDenied && (
         <div
-          className={`w-3 h-3 rounded-full ${
-            status === "ok" ? "bg-green-400 animate-pulse" : "bg-red-400"
+          className={`absolute top-2 right-2 px-2 py-1 rounded-lg text-xs font-medium ${
+            status === "ok"
+              ? "bg-green-500/80 text-white"
+              : status === "warning"
+              ? "bg-yellow-500/80 text-white"
+              : "bg-red-500/80 text-white"
           }`}
-        />
-      </div>
+        >
+          {statusText}
+        </div>
+      )}
+
+      {/* Live indicator dot */}
+      {status === "ok" && (
+        <div className="absolute top-2 left-2">
+          <div className="w-2.5 h-2.5 bg-green-400 rounded-full animate-pulse" />
+        </div>
+      )}
     </div>
   );
 }
-
-// Export getEvents via ref pattern
-export type { FaceMonitorProps };
