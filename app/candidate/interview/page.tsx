@@ -105,7 +105,6 @@ function InterviewContent() {
           transcript: currentTranscript || "(no answer)",
           turn_number: turnNumber,
           preferred_language: lang,
-          integrity_events: integrityEvents,
         }),
       });
       if (!res.ok) throw new Error(`Agent error: ${res.status}`);
@@ -132,6 +131,7 @@ function InterviewContent() {
       });
 
       if (data.is_complete) {
+        await flushIntegrityEvents(integrityEvents);
         setPhase("complete");
         return;
       }
@@ -236,7 +236,7 @@ function InterviewContent() {
           </div>
           <p className="text-xs text-gray-400 mb-6">{t("thankYou", lang)}</p>
           <button
-            onClick={() => router.push(`/candidate/result?session=${sessionId}`)}
+            onClick={() => router.push("/")}
             className="w-full bg-green-700 text-white py-3 rounded-xl font-bold"
           >
             {t("home", lang)}
@@ -406,6 +406,7 @@ function InterviewContent() {
           onError={(e) => setError(e)}
           isActive={isRecording}
           onMicReady={() => setMicPermitted(true)}
+          lang={lang}
         />
 
         {phase === "setup" ? (

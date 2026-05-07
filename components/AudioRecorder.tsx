@@ -16,6 +16,7 @@ interface AudioRecorderProps {
   onError?: (error: string) => void;
   isActive: boolean;         // controlled by parent — true = recording
   onMicReady?: () => void;   // called once mic permission is granted
+  lang?: string;             // "kn" | "en" | "hi" — passed to ASR for model routing
 }
 
 const CHUNK_DURATION_MS = 5000;
@@ -27,6 +28,7 @@ export default function AudioRecorder({
   onError,
   isActive,
   onMicReady,
+  lang = "kn",
 }: AudioRecorderProps) {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -56,7 +58,7 @@ export default function AudioRecorder({
       try {
         const formData = new FormData();
         formData.append("audio", blob, "chunk.webm");
-        const res = await fetch(`${apiUrl}/asr/transcribe`, {
+        const res = await fetch(`${apiUrl}/asr/transcribe?lang=${lang}`, {
           method: "POST",
           body: formData,
         });
