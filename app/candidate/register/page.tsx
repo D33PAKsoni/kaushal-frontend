@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { t, Lang } from "@/lib/translations";
 
@@ -15,12 +15,23 @@ const DISTRICTS = [
   "Kalaburagi","Shivamogga","Hassan","Mandya",
 ];
 
+type PermState = "idle" | "requesting" | "granted" | "denied";
+
 export default function RegisterPage() {
   const router = useRouter();
   const [lang, setLang] = useState<Lang>("kn");
   const [form, setForm] = useState({ name: "", trade: "", district: "" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  // Permission states
+  const [micPerm, setMicPerm] = useState<PermState>("idle");
+  const [camPerm, setCamPerm] = useState<PermState>("idle");
+  const [permRequested, setPermRequested] = useState(false);
+
+  const bothGranted = micPerm === "granted" && camPerm === "granted";
+  const anyDenied = micPerm === "denied" || camPerm === "denied";
+  const requesting = micPerm === "requesting" || camPerm === "requesting";
 
   useEffect(() => {
     const stored = sessionStorage.getItem("km_lang") as Lang | null;
@@ -31,11 +42,77 @@ export default function RegisterPage() {
     }
   }, [router]);
 
+  // Check if permissions already granted (browser remembers)
+  useEffect(() => {
+    const checkExisting = async () => {
+      if (!navigator.permissions) return;
+      try {
+        const [mic, cam] = await Promise.all([
+          navigator.permissions.query({ name: "microphone" as PermissionName }),
+          navigator.permissions.query({ name: "camera" as PermissionName }),
+        ]);
+        if (mic.state === "granted") setMicPerm("granted");
+        if (cam.state === "granted") setCamPerm("granted");
+      } catch { /* permissions API not supported — will ask on button click */ }
+    };
+    checkExisting();
+  }, []);
+
+  const requestPermissions = useCallback(async () => {
+    setPermRequested(true);
+    setMicPerm("requesting");
+    setCamPerm("requesting");
+    setError("");
+
+    let micGranted = false;
+    let camGranted = false;
+
+    // Request microphone
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      stream.getTracks().forEach((t) => t.stop()); // release immediately
+      setMicPerm("granted");
+      micGranted = true;
+    } catch (e: any) {
+      setMicPerm("denied");
+      console.warn("Mic denied:", e.name);
+    }
+
+    // Request camera
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      stream.getTracks().forEach((t) => t.stop()); // release immediately
+      setCamPerm("granted");
+      camGranted = true;
+    } catch (e: any) {
+      setCamPerm("denied");
+      console.warn("Camera denied:", e.name);
+    }
+
+    if (!micGranted || !camGranted) {
+      const denied = [];
+      if (!micGranted) denied.push(lang === "kn" ? "ಮೈಕ್" : "microphone");
+      if (!camGranted) denied.push(lang === "kn" ? "ಕ್ಯಾಮೆರಾ" : "camera");
+      setError(
+        lang === "kn"
+          ? `${denied.join(" ಮತ್ತು ")} ಅನುಮತಿ ನೀಡಿ. ಬ್ರೌಸರ್ ಸೆಟ್ಟಿಂಗ್‌ನಲ್ಲಿ ಅನುಮತಿ ಆನ್ ಮಾಡಿ.`
+          : `Please allow ${denied.join(" and ")} access. Go to browser Settings → Site Settings to enable.`
+      );
+    }
+  }, [lang]);
+
   const handleSubmit = async () => {
+    // If permissions not yet granted, request them first
+    if (!bothGranted) {
+      await requestPermissions();
+      return;
+    }
+
     if (!form.name.trim() || !form.trade || !form.district) {
       setError(t("fillAllFields", lang));
       return;
     }
+
     setLoading(true);
     setError("");
     try {
@@ -64,9 +141,34 @@ export default function RegisterPage() {
     }
   };
 
+  // Button label and colour logic
+  const getButtonConfig = () => {
+    if (loading) return { label: t("pleaseWait", lang), cls: "bg-gray-400 cursor-not-allowed" };
+    if (requesting) return {
+      label: lang === "kn" ? "⏳ ಅನುಮತಿ ಕಾಯುತ್ತಿದೆ..." : "⏳ Requesting permissions...",
+      cls: "bg-yellow-500 cursor-wait",
+    };
+    if (bothGranted) return {
+      label: lang === "kn" ? "✅ ಮುಂದೆ → ಸಂದರ್ಶನ" : "✅ Continue → Interview",
+      cls: "bg-blue-600 hover:bg-blue-500",
+    };
+    if (anyDenied) return {
+      label: lang === "kn" ? "🔒 ಅನುಮತಿ ನೀಡಿ — ಮತ್ತೆ ಪ್ರಯತ್ನಿಸಿ" : "🔒 Allow permissions — Try again",
+      cls: "bg-orange-500 hover:bg-orange-400",
+    };
+    // idle — not yet requested
+    return {
+      label: lang === "kn" ? "📷🎤 ಅನುಮತಿ ನೀಡಿ ಮತ್ತು ಮುಂದೆ ಹೋಗಿ" : "📷🎤 Allow & Continue",
+      cls: "bg-green-700 hover:bg-green-600",
+    };
+  };
+
+  const btn = getButtonConfig();
+
   return (
     <main className="min-h-screen bg-gradient-to-b from-green-900 to-green-700 flex items-center justify-center px-4 py-8">
       <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl">
+
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <button
@@ -85,6 +187,7 @@ export default function RegisterPage() {
         </div>
 
         <div className="space-y-4">
+
           {/* Name */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -138,15 +241,67 @@ export default function RegisterPage() {
             </select>
           </div>
 
-          {error && <p className="text-red-500 text-sm text-center">{error}</p>}
+          {/* Permission status indicators */}
+          {permRequested && (
+            <div className="grid grid-cols-2 gap-2">
+              <div className={`flex items-center gap-2 rounded-xl px-3 py-2 text-sm ${
+                micPerm === "granted" ? "bg-green-50 text-green-700" :
+                micPerm === "denied"  ? "bg-red-50 text-red-600" :
+                "bg-yellow-50 text-yellow-700"
+              }`}>
+                <span>{micPerm === "granted" ? "✅" : micPerm === "denied" ? "❌" : "⏳"}</span>
+                <span>{lang === "kn" ? "ಮೈಕ್" : "Microphone"}</span>
+              </div>
+              <div className={`flex items-center gap-2 rounded-xl px-3 py-2 text-sm ${
+                camPerm === "granted" ? "bg-green-50 text-green-700" :
+                camPerm === "denied"  ? "bg-red-50 text-red-600" :
+                "bg-yellow-50 text-yellow-700"
+              }`}>
+                <span>{camPerm === "granted" ? "✅" : camPerm === "denied" ? "❌" : "⏳"}</span>
+                <span>{lang === "kn" ? "ಕ್ಯಾಮೆರಾ" : "Camera"}</span>
+              </div>
+            </div>
+          )}
+
+          {/* Browser instructions when denied */}
+          {anyDenied && (
+            <div className="bg-orange-50 border border-orange-200 rounded-xl p-3 text-xs text-orange-700 space-y-1">
+              <p className="font-medium">
+                {lang === "kn" ? "ಅನುಮತಿ ಹೇಗೆ ನೀಡುವುದು:" : "How to allow permissions:"}
+              </p>
+              <p>
+                {lang === "kn"
+                  ? "Chrome: ಅಡ್ರೆಸ್ ಬಾರ್ ನಲ್ಲಿ 🔒 ಐಕಾನ್ → Site settings → Allow"
+                  : "Chrome: Click 🔒 in address bar → Site settings → Allow camera & mic"}
+              </p>
+              <p>
+                {lang === "kn"
+                  ? "Safari: Settings → Websites → Camera & Microphone → Allow"
+                  : "Safari: Settings → Websites → Camera & Microphone → Allow"}
+              </p>
+            </div>
+          )}
+
+          {error && (
+            <p className="text-red-500 text-sm text-center">{error}</p>
+          )}
 
           <button
             onClick={handleSubmit}
-            disabled={loading}
-            className="w-full bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white font-bold text-lg py-4 rounded-2xl transition-all active:scale-95 mt-2"
+            disabled={loading || requesting}
+            className={`w-full text-white font-bold text-base py-4 rounded-2xl transition-all active:scale-95 mt-2 disabled:opacity-60 ${btn.cls}`}
           >
-            {loading ? t("pleaseWait", lang) : `${t("continue", lang)} →`}
+            {loading ? t("pleaseWait", lang) : btn.label}
           </button>
+
+          {/* Helper text */}
+          {!permRequested && (
+            <p className="text-xs text-gray-400 text-center">
+              {lang === "kn"
+                ? "📷 ಕ್ಯಾಮೆರಾ ಮತ್ತು 🎤 ಮೈಕ್ ಅನುಮತಿ ಸಂದರ್ಶನಕ್ಕೆ ಅಗತ್ಯ"
+                : "📷 Camera and 🎤 mic access are required for the interview"}
+            </p>
+          )}
         </div>
       </div>
     </main>
