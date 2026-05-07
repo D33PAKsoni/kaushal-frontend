@@ -1,0 +1,270 @@
+"use client";
+
+import { useEffect, useState, Suspense } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
+import { Lang } from "@/lib/translations";
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+const FITMENT_STYLE: Record<string, { bg: string; text: string; border: string }> = {
+  job_ready:         { bg: "bg-green-50",  text: "text-green-800",  border: "border-green-300" },
+  trainable:         { bg: "bg-yellow-50", text: "text-yellow-800", border: "border-yellow-300" },
+  requires_training: { bg: "bg-orange-50", text: "text-orange-800", border: "border-orange-300" },
+  not_suitable:      { bg: "bg-red-50",    text: "text-red-800",    border: "border-red-300" },
+  review_required:   { bg: "bg-gray-50",   text: "text-gray-800",   border: "border-gray-300" },
+};
+
+function ScoreBar({ label, score, lang }: { label: string; score: number; lang: Lang }) {
+  const pct = Math.round((score / 10) * 100);
+  const color =
+    score >= 8 ? "bg-green-500" :
+    score >= 6 ? "bg-yellow-500" :
+    score >= 4 ? "bg-orange-500" : "bg-red-500";
+  return (
+    <div className="mb-3">
+      <div className="flex justify-between text-sm mb-1">
+        <span className="text-gray-600">{label}</span>
+        <span className="font-bold text-gray-800">{score.toFixed(1)}/10</span>
+      </div>
+      <div className="h-2.5 bg-gray-200 rounded-full overflow-hidden">
+        <div
+          className={`h-full ${color} rounded-full transition-all duration-700`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ResultContent() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const sessionId = searchParams.get("session") || "";
+  const [lang, setLang] = useState<Lang>("kn");
+  const [status, setStatus] = useState<"waiting" | "ready" | "error">("waiting");
+  const [result, setResult] = useState<any>(null);
+  const [pollCount, setPollCount] = useState(0);
+
+  useEffect(() => {
+    const l = sessionStorage.getItem("km_lang") as Lang | null;
+    if (l) setLang(l);
+  }, []);
+
+  // Poll status every 3 seconds
+  useEffect(() => {
+    if (!sessionId) return;
+    if (status === "ready") return;
+
+    const poll = async () => {
+      try {
+        const res = await fetch(`${API_URL}/score/${sessionId}/status`);
+        const data = await res.json();
+
+        if (data.status === "complete") {
+          const rRes = await fetch(`${API_URL}/score/${sessionId}/result/summary`);
+          const rData = await rRes.json();
+          setResult(rData);
+          setStatus("ready");
+        } else if (data.status === "error") {
+          setStatus("error");
+        } else {
+          setPollCount((p) => p + 1);
+        }
+      } catch {
+        setPollCount((p) => p + 1);
+      }
+    };
+
+    const timer = setInterval(poll, 3000);
+    poll(); // immediate first poll
+    return () => clearInterval(timer);
+  }, [sessionId, status]);
+
+  // ── Waiting screen ────────────────────────────────────
+  if (status === "waiting") {
+    return (
+      <main className="min-h-screen bg-gradient-to-b from-green-900 to-green-700 flex items-center justify-center px-4">
+        <div className="bg-white rounded-2xl p-8 max-w-sm w-full text-center shadow-xl">
+          <div className="text-5xl mb-4 animate-bounce">⏳</div>
+          <h2 className="text-xl font-bold text-gray-800 mb-2">
+            {lang === "kn" ? "ಫಲಿತಾಂಶ ತಯಾರಾಗುತ್ತಿದೆ..." : "Preparing your result..."}
+          </h2>
+          <p className="text-gray-400 text-sm mb-6">
+            {lang === "kn"
+              ? "ನಿಮ್ಮ ಉತ್ತರಗಳನ್ನು ವಿಶ್ಲೇಷಿಸಲಾಗುತ್ತಿದೆ"
+              : "Your answers are being analysed"}
+          </p>
+          <div className="flex justify-center gap-1 mb-4">
+            {[0, 1, 2].map((i) => (
+              <div
+                key={i}
+                className="w-2.5 h-2.5 bg-green-500 rounded-full animate-bounce"
+                style={{ animationDelay: `${i * 0.15}s` }}
+              />
+            ))}
+          </div>
+          <p className="text-xs text-gray-300">
+            {lang === "kn" ? `${pollCount * 3} ಸೆಕೆಂಡ್...` : `${pollCount * 3}s elapsed...`}
+          </p>
+        </div>
+      </main>
+    );
+  }
+
+  // ── Error screen ──────────────────────────────────────
+  if (status === "error" || !result) {
+    return (
+      <main className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
+        <div className="text-center">
+          <div className="text-4xl mb-3">⚠️</div>
+          <p className="text-gray-600">
+            {lang === "kn" ? "ಫಲಿತಾಂಶ ಲೋಡ್ ಆಗಲಿಲ್ಲ" : "Could not load result"}
+          </p>
+          <button
+            onClick={() => router.push("/")}
+            className="mt-4 text-green-700 underline text-sm"
+          >
+            {lang === "kn" ? "ಮುಖಪುಟಕ್ಕೆ ಹಿಂತಿರುಗಿ" : "Go home"}
+          </button>
+        </div>
+      </main>
+    );
+  }
+
+  // ── Result card ───────────────────────────────────────
+  const fc = result.fitment_category;
+  const style = FITMENT_STYLE[fc] || FITMENT_STYLE.review_required;
+  const label = lang === "kn" ? result.fitment_label_kn : result.fitment_label_en;
+  const cards = result.reason_cards || {};
+
+  return (
+    <main className="min-h-screen bg-gray-50 pb-10">
+      {/* Header */}
+      <div className="bg-green-800 text-white px-4 py-4 text-center">
+        <h1 className="font-bold text-lg">KaushalMitra</h1>
+        <p className="text-green-300 text-xs">
+          {lang === "kn" ? "ಕೌಶಲ ಮೌಲ್ಯಮಾಪನ ಫಲಿತಾಂಶ" : "Skill Assessment Result"}
+        </p>
+      </div>
+
+      <div className="max-w-lg mx-auto px-4 pt-5 space-y-4">
+
+        {/* Fitment badge */}
+        <div className={`rounded-2xl p-5 border-2 text-center ${style.bg} ${style.border}`}>
+          <p className={`text-3xl font-bold mb-1 ${style.text}`}>{label}</p>
+          <p className="text-gray-500 text-sm">
+            {lang === "kn" ? "ಒಟ್ಟು ಸ್ಕೋರ್" : "Composite Score"}:
+            <span className="font-bold text-gray-700 ml-1">{result.composite_score}/10</span>
+          </p>
+          {result.is_flagged && (
+            <p className="mt-2 text-xs text-red-600 font-medium">
+              🔍 {lang === "kn" ? "ಹಸ್ತಚಾಲಿತ ಪರಿಶೀಲನೆ ಅಗತ್ಯ" : "Flagged for manual review"}
+            </p>
+          )}
+        </div>
+
+        {/* Score bars */}
+        <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100">
+          <h3 className="font-semibold text-gray-700 mb-4">
+            {lang === "kn" ? "ಸ್ಕೋರ್ ವಿವರ" : "Score Breakdown"}
+          </h3>
+          <ScoreBar
+            label={lang === "kn" ? "ವಿಷಯ ಜ್ಞಾನ" : "Domain Knowledge"}
+            score={result.domain_score}
+            lang={lang}
+          />
+          <ScoreBar
+            label={lang === "kn" ? "ಸಂವಹನ" : "Communication"}
+            score={result.communication_score}
+            lang={lang}
+          />
+          <ScoreBar
+            label={lang === "kn" ? "ಒಟ್ಟು" : "Composite"}
+            score={result.composite_score}
+            lang={lang}
+          />
+        </div>
+
+        {/* Summary */}
+        {(cards.summary_kn || cards.summary_en) && (
+          <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100">
+            <h3 className="font-semibold text-gray-700 mb-2">
+              {lang === "kn" ? "ಸಾರಾಂಶ" : "Summary"}
+            </h3>
+            <p className="text-gray-600 text-sm leading-relaxed">
+              {lang === "kn" ? cards.summary_kn : cards.summary_en}
+            </p>
+          </div>
+        )}
+
+        {/* Strengths */}
+        {(cards.strengths_kn || cards.strengths_en) && (
+          <div className="bg-green-50 rounded-2xl p-5 border border-green-100">
+            <h3 className="font-semibold text-green-800 mb-3">
+              {lang === "kn" ? "✅ ಶಕ್ತಿಗಳು" : "✅ Strengths"}
+            </h3>
+            <ul className="space-y-1">
+              {(lang === "kn" ? cards.strengths_kn : cards.strengths_en)?.map(
+                (s: string, i: number) => (
+                  <li key={i} className="text-green-700 text-sm flex gap-2">
+                    <span>•</span><span>{s}</span>
+                  </li>
+                )
+              )}
+            </ul>
+          </div>
+        )}
+
+        {/* Areas to improve */}
+        {(cards.improvements_kn || cards.improvements_en) && (
+          <div className="bg-orange-50 rounded-2xl p-5 border border-orange-100">
+            <h3 className="font-semibold text-orange-800 mb-3">
+              {lang === "kn" ? "📈 ಸುಧಾರಣೆ ಬೇಕಾದ ಕ್ಷೇತ್ರಗಳು" : "📈 Areas to Improve"}
+            </h3>
+            <ul className="space-y-1">
+              {(lang === "kn" ? cards.improvements_kn : cards.improvements_en)?.map(
+                (s: string, i: number) => (
+                  <li key={i} className="text-orange-700 text-sm flex gap-2">
+                    <span>•</span><span>{s}</span>
+                  </li>
+                )
+              )}
+            </ul>
+          </div>
+        )}
+
+        {/* Next action */}
+        {(cards.next_action_kn || cards.next_action_en) && (
+          <div className="bg-blue-50 rounded-2xl p-5 border border-blue-200">
+            <h3 className="font-semibold text-blue-800 mb-2">
+              {lang === "kn" ? "👉 ಮುಂದಿನ ಹೆಜ್ಜೆ" : "👉 Recommended Next Step"}
+            </h3>
+            <p className="text-blue-700 text-sm font-medium">
+              {lang === "kn" ? cards.next_action_kn : cards.next_action_en}
+            </p>
+          </div>
+        )}
+
+        {/* Home button */}
+        <button
+          onClick={() => router.push("/")}
+          className="w-full bg-green-700 text-white py-4 rounded-2xl font-bold text-lg mt-2"
+        >
+          {lang === "kn" ? "ಮುಖಪುಟ" : "Home"}
+        </button>
+      </div>
+    </main>
+  );
+}
+
+export default function ResultPage() {
+  return (
+    <Suspense fallback={
+      <div className="flex items-center justify-center min-h-screen text-gray-400">
+        Loading...
+      </div>
+    }>
+      <ResultContent />
+    </Suspense>
+  );
+}
